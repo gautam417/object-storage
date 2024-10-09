@@ -1,9 +1,35 @@
-FROM golang:1.15
-WORKDIR /mnt/homework
-COPY . .
-RUN go build
+# Build stage
+FROM golang:1.20-alpine AS builder
 
-# Docker is used as a base image so you can easily start playing around in the container using the Docker command line client.
-FROM docker
-COPY --from=0 /mnt/homework/homework-object-storage /usr/local/bin/homework-object-storage
-RUN apk add bash curl
+# Install build dependencies
+RUN apk add --no-cache git
+
+WORKDIR /app
+
+# Copy go mod and sum files
+COPY go.mod go.sum ./
+
+# Download all dependencies
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
+
+# Final stage
+FROM alpine:3.18
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+# Copy the binary from the builder stage
+COPY --from=builder /app/main .
+
+# Expose the application port
+EXPOSE 3000
+
+# Run the binary
+CMD ["./main"]
