@@ -9,7 +9,6 @@ import (
 type Config struct {
 	Port        int    `mapstructure:"PORT"`
 	LogLevel    string `mapstructure:"LOG_LEVEL"`
-	BucketName  string `mapstructure:"BUCKET_NAME"`
 	MinioConfig MinioConfig
 }
 
@@ -23,7 +22,6 @@ type MinioConfig struct {
 func Load() (*Config, error) {
 	viper.SetDefault("PORT", 3000)
 	viper.SetDefault("LOG_LEVEL", "info")
-	viper.SetDefault("BUCKET_NAME", "default-bucket")
 	viper.SetDefault("MINIO_USE_SSL", false)
 
 	viper.AutomaticEnv()

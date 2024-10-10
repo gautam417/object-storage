@@ -33,8 +33,15 @@ func main() {
 
 	h := handlers.NewHandler(minioInstances, logger)
 
-	r.Put("/object/{id}", h.HandlePutObject)
-	r.Get("/object/{id}", h.HandleGetObject)
+	r.Route("/buckets", func(r chi.Router) {
+		r.Post("/", h.HandleCreateBucket)
+		r.Delete("/{bucketName}", h.HandleDeleteBucket)
+		r.Route("/{bucketName}/objects", func(r chi.Router) {
+			r.Put("/{id}", h.HandlePutObject)
+			r.Get("/{id}", h.HandleGetObject)
+			r.Delete("/{id}", h.HandleDeleteObject)
+		})
+	})
 
 	srv := &http.Server{
 		Addr:    ":3000",
