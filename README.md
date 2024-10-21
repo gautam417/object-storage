@@ -36,3 +36,22 @@ docker-compose up --build
 ```
 
 Good luck!
+
+---
+# Get Health
+![Get Health API](https://github.com/gautam417/object-storage/blob/main/screenshots/GETHealth.png)
+
+# Create Bucket
+![Create Bucket API](https://github.com/gautam417/object-storage/blob/main/screenshots/POSTBucket.png)
+
+# Put Object in Bucket
+![Put Object in Bucket API](https://github.com/gautam417/object-storage/blob/main/screenshots/PUTObjectInBucket.png)
+
+# Get Object in Bucket
+![Get Object in Bucket API](https://github.com/gautam417/object-storage/blob/main/screenshots/GETObjectInBucket.png)
+
+# Delete Bucket
+![Delete Bucket API](https://github.com/gautam417/object-storage/blob/main/screenshots/DELETEBucket.png)
+
+# Delete Object in Bucket
+![Delete Object in Bucket API](https://github.com/gautam417/object-storage/blob/main/screenshots/DELETEObjectInBucket.png)
