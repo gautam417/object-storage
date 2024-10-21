@@ -1,7 +1,6 @@
-package storage
+package docker_discovery
 
 import (
-	"context"
 	"testing"
 
 	"github.com/docker/docker/api/types"
@@ -9,30 +8,14 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	minio_adapter "github.com/spacelift-io/homework-object-storage/minio"
+	"github.com/spacelift-io/homework-object-storage/docker_discovery/mocks"
 )
 
-type MockDockerClient struct {
-	mock.Mock
-}
-
-func (m *MockDockerClient) ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error) {
-	args := m.Called(ctx, options)
-	return args.Get(0).([]types.Container), args.Error(1)
-}
-
-func (m *MockDockerClient) ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error) {
-	args := m.Called(ctx, containerID)
-	return args.Get(0).(types.ContainerJSON), args.Error(1)
-}
-
-func (m *MockDockerClient) Close() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
 func TestDiscoverMinioInstances(t *testing.T) {
-	mockClient := new(MockDockerClient)
-	
+	mockClient := new(mocks.MockDockerClient)
+
 	mockContainers := []types.Container{
 		{
 			ID:    "container1",
@@ -43,7 +26,7 @@ func TestDiscoverMinioInstances(t *testing.T) {
 			Names: []string{"/amazin-object-storage-node-2"},
 		},
 		{
-			ID:   "container3",
+			ID:    "container3",
 			Names: []string{"/some-other-container"},
 		},
 	}
@@ -111,11 +94,11 @@ func TestDiscoverMinioInstances(t *testing.T) {
 }
 
 func TestDiscoverMinioInstances_NoInstancesFound(t *testing.T) {
-	mockClient := new(MockDockerClient)
-	
+	mockClient := new(mocks.MockDockerClient)
+
 	mockContainers := []types.Container{
 		{
-			ID:   "container3",
+			ID:    "container3",
 			Names: []string{"/some-other-container"},
 		},
 	}
@@ -138,7 +121,7 @@ func TestDiscoverMinioInstances_NoInstancesFound(t *testing.T) {
 }
 
 func TestGetMinioInstanceInfo(t *testing.T) {
-	mockClient := new(MockDockerClient)
+	mockClient := new(mocks.MockDockerClient)
 
 	mockInspect := types.ContainerJSON{
 		ContainerJSONBase: &types.ContainerJSONBase{
@@ -171,7 +154,7 @@ func TestGetMinioInstanceInfo(t *testing.T) {
 }
 
 func TestGetMinioInstanceInfo_NoIP(t *testing.T) {
-	mockClient := new(MockDockerClient)
+	mockClient := new(mocks.MockDockerClient)
 
 	mockInspect := types.ContainerJSON{
 		ContainerJSONBase: &types.ContainerJSONBase{
@@ -192,7 +175,7 @@ func TestGetMinioInstanceInfo_NoIP(t *testing.T) {
 	instance, err := getMinioInstanceInfo(mockClient, "container1")
 
 	assert.Error(t, err)
-	assert.Equal(t, MinioInstance{}, instance)
+	assert.Equal(t, minio_adapter.MinioInstance{}, instance)
 	assert.Equal(t, "failed to get container IP", err.Error())
 
 	mockClient.AssertExpectations(t)

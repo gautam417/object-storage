@@ -1,4 +1,4 @@
-package storage
+package docker_discovery
 
 import (
 	"context"
@@ -7,15 +7,10 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
+
+	minio_adapter "github.com/spacelift-io/homework-object-storage/minio"
 )
 
-type MinioInstance struct {
-	Endpoint  string
-	AccessKey string
-	SecretKey string
-}
-
-// DockerClient interface for the methods we need
 type DockerClient interface {
 	ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error)
 	ContainerInspect(ctx context.Context, containerID string) (types.ContainerJSON, error)
@@ -26,7 +21,7 @@ var newDockerClient = func() (DockerClient, error) {
 	return client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 }
 
-func DiscoverMinioInstances() ([]MinioInstance, error) {
+func DiscoverMinioInstances() ([]minio_adapter.MinioInstance, error) {
 	cli, err := newDockerClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Docker client: %w", err)
@@ -38,7 +33,7 @@ func DiscoverMinioInstances() ([]MinioInstance, error) {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var instances []MinioInstance
+	var instances []minio_adapter.MinioInstance
 	for _, container := range containers {
 		if strings.Contains(strings.Join(container.Names, " "), "amazin-object-storage-node") {
 			instance, err := getMinioInstanceInfo(cli, container.ID)
@@ -56,10 +51,10 @@ func DiscoverMinioInstances() ([]MinioInstance, error) {
 	return instances, nil
 }
 
-func getMinioInstanceInfo(cli DockerClient, containerID string) (MinioInstance, error) {
+func getMinioInstanceInfo(cli DockerClient, containerID string) (minio_adapter.MinioInstance, error) {
 	inspect, err := cli.ContainerInspect(context.Background(), containerID)
 	if err != nil {
-		return MinioInstance{}, fmt.Errorf("failed to inspect container: %w", err)
+		return minio_adapter.MinioInstance{}, fmt.Errorf("failed to inspect container: %w", err)
 	}
 
 	var ip string
@@ -69,7 +64,7 @@ func getMinioInstanceInfo(cli DockerClient, containerID string) (MinioInstance, 
 	}
 
 	if ip == "" {
-		return MinioInstance{}, fmt.Errorf("failed to get container IP")
+		return minio_adapter.MinioInstance{}, fmt.Errorf("failed to get container IP")
 	}
 
 	var accessKey, secretKey string
@@ -82,10 +77,10 @@ func getMinioInstanceInfo(cli DockerClient, containerID string) (MinioInstance, 
 	}
 
 	if accessKey == "" || secretKey == "" {
-		return MinioInstance{}, fmt.Errorf("failed to get MinIO credentials")
+		return minio_adapter.MinioInstance{}, fmt.Errorf("failed to get MinIO credentials")
 	}
 
-	return MinioInstance{
+	return minio_adapter.MinioInstance{
 		Endpoint:  fmt.Sprintf("%s:9000", ip),
 		AccessKey: accessKey,
 		SecretKey: secretKey,

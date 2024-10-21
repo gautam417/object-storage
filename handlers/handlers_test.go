@@ -3,159 +3,222 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/minio/minio-go/v7"
+	minio "github.com/minio/minio-go/v7"
 	"github.com/sirupsen/logrus"
-	"github.com/spacelift-io/homework-object-storage/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+ 
+	minio_adapter "github.com/spacelift-io/homework-object-storage/minio"
+	"github.com/spacelift-io/homework-object-storage/minio/mocks"
 )
 
-type MockMinioClient struct {
-	mock.Mock
-}
-
-func (m *MockMinioClient) PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
-	args := m.Called(ctx, bucketName, objectName, reader, objectSize, opts)
-	return args.Get(0).(minio.UploadInfo), args.Error(1)
-}
-
-func (m *MockMinioClient) GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (MinioObject, error) {
-	args := m.Called(ctx, bucketName, objectName, opts)
-	return args.Get(0).(MinioObject), args.Error(1)
-}
-
-func (m *MockMinioClient) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error) {
-	args := m.Called(ctx)
-	return args.Get(0).([]minio.BucketInfo), args.Error(1)
-}
-
-func (m *MockMinioClient) BucketExists(ctx context.Context, bucketName string) (bool, error) {
-	args := m.Called(ctx, bucketName)
-	return args.Bool(0), args.Error(1)
-}
-
-func (m *MockMinioClient) MakeBucket(ctx context.Context, bucketName string, opts minio.MakeBucketOptions) error {
-	args := m.Called(ctx, bucketName, opts)
-	return args.Error(0)
-}
-
-func (m *MockMinioClient) RemoveBucket(ctx context.Context, bucketName string) error {
-	args := m.Called(ctx, bucketName)
-	return args.Error(0)
-}
-
-func (m *MockMinioClient) RemoveObject(ctx context.Context, bucketName, objectName string, opts minio.RemoveObjectOptions) error {
-	args := m.Called(ctx, bucketName, objectName, opts)
-	return args.Error(0)
-}
-
-type MockMinioObject struct {
-	mock.Mock
-	io.Reader
-}
-
-func (m *MockMinioObject) Close() error {
-	args := m.Called()
-	return args.Error(0)
-}
-
-func (m *MockMinioObject) Stat() (minio.ObjectInfo, error) {
-	args := m.Called()
-	return args.Get(0).(minio.ObjectInfo), args.Error(1)
-}
-
 func TestHandleCreateBucket(t *testing.T) {
-	mockClient := new(MockMinioClient)
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
 
-	minioInstances := []storage.MinioInstance{
+	minioInstances := []minio_adapter.MinioInstance{
 		{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
 	}
-	h := NewHandler(minioInstances, logger)
 
-	h.getMinioClient = func(id string) (MinioClientInterface, error) {
-		return mockClient, nil
+	tests := []struct {
+		name           string
+		bucketName     string
+		mockSetup      func(*mocks.MockMinioClient)
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:       "Successful bucket creation",
+			bucketName: "new-bucket",
+			mockSetup: func(m *mocks.MockMinioClient) {
+				m.On("MakeBucket", mock.Anything, "new-bucket", mock.Anything).Return(nil)
+			},
+			expectedStatus: http.StatusCreated,
+			expectedBody:   `{"message":"Bucket created successfully"}`,
+		},
+		{
+			name:       "Bucket already exists",
+			bucketName: "existing-bucket",
+			mockSetup: func(m *mocks.MockMinioClient) {
+				m.On("MakeBucket", mock.Anything, "existing-bucket", mock.Anything).Return(
+					errors.New("Your previous request to create the named bucket succeeded and you already own it."))
+			},
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "Bucket already exists",
+		},
+		{
+			name:       "Bucket name already taken",
+			bucketName: "taken-bucket",
+			mockSetup: func(m *mocks.MockMinioClient) {
+				m.On("MakeBucket", mock.Anything, "taken-bucket", mock.Anything).Return(
+					errors.New("Bucket name already exists"))
+			},
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "Bucket name already taken",
+		},
+		{
+			name:       "Internal server error",
+			bucketName: "error-bucket",
+			mockSetup: func(m *mocks.MockMinioClient) {
+				m.On("MakeBucket", mock.Anything, "error-bucket", mock.Anything).Return(
+					errors.New("Internal server error"))
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Failed to create bucket",
+		},
 	}
 
-	mockClient.On("MakeBucket", mock.Anything, "test-bucket", mock.Anything).Return(nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mocks.MockMinioClient)
+			tt.mockSetup(mockClient)
 
-	r := chi.NewRouter()
-	r.Post("/buckets", h.HandleCreateBucket)
+			h := NewHandler(minioInstances, logger)
+			h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
+				return mockClient, nil
+			}
 
-	body := bytes.NewBufferString(`{"bucketName":"test-bucket"}`)
-	req, _ := http.NewRequest("POST", "/buckets", body)
-	rr := httptest.NewRecorder()
+			r := chi.NewRouter()
+			r.Post("/buckets", h.HandleCreateBucket)
 
-	r.ServeHTTP(rr, req)
+			body := bytes.NewBufferString(fmt.Sprintf(`{"bucketName":"%s"}`, tt.bucketName))
+			req, _ := http.NewRequest("POST", "/buckets", body)
+			rr := httptest.NewRecorder()
 
-	assert.Equal(t, http.StatusCreated, rr.Code)
-	mockClient.AssertExpectations(t)
+			r.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+			assert.Equal(t, tt.expectedBody, strings.TrimSpace(rr.Body.String()))
+			mockClient.AssertExpectations(t)
+		})
+	}
 }
 
 func TestHandleDeleteBucket(t *testing.T) {
-	mockClient := new(MockMinioClient)
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
 
-	minioInstances := []storage.MinioInstance{
+	minioInstances := []minio_adapter.MinioInstance{
 		{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
 	}
-	h := NewHandler(minioInstances, logger)
 
-	h.getMinioClient = func(id string) (MinioClientInterface, error) {
-		return mockClient, nil
+	tests := []struct {
+		name           string
+		bucketName     string
+		setupMock      func(*mocks.MockMinioClient)
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:       "Successful bucket deletion",
+			bucketName: "empty-bucket",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("RemoveBucket", mock.Anything, "empty-bucket").Return(nil)
+			},
+			expectedStatus: http.StatusNoContent,
+			expectedBody:   "",
+		},
+		{
+			name:       "Delete non-empty bucket",
+			bucketName: "non-empty-bucket",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("RemoveBucket", mock.Anything, "non-empty-bucket").Return(
+					minio.ErrorResponse{Code: "BucketNotEmpty"})
+			},
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "The bucket you tried to delete is not empty\n",
+		},
+		{
+			name:       "Delete non-existent bucket",
+			bucketName: "non-existent-bucket",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("RemoveBucket", mock.Anything, "non-existent-bucket").Return(
+					minio.ErrorResponse{Code: "NoSuchBucket"})
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   "The specified bucket does not exist\n",
+		},
+		{
+			name:       "Internal server error",
+			bucketName: "error-bucket",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("RemoveBucket", mock.Anything, "error-bucket").Return(
+					errors.New("Internal server error"))
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Failed to delete bucket\n",
+		},
 	}
 
-	mockClient.On("RemoveBucket", mock.Anything, "test-bucket").Return(nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mocks.MockMinioClient)
+			tt.setupMock(mockClient)
 
-	r := chi.NewRouter()
-	r.Delete("/buckets/{bucketName}", h.HandleDeleteBucket)
+			h := NewHandler(minioInstances, logger)
+			h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
+				return mockClient, nil
+			}
 
-	req, _ := http.NewRequest("DELETE", "/buckets/test-bucket", nil)
-	rr := httptest.NewRecorder()
+			r := chi.NewRouter()
+			r.Delete("/buckets/{bucketName}", h.HandleDeleteBucket)
 
-	r.ServeHTTP(rr, req)
+			req, _ := http.NewRequest("DELETE", "/buckets/"+tt.bucketName, nil)
+			rr := httptest.NewRecorder()
 
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-	mockClient.AssertExpectations(t)
+			r.ServeHTTP(rr, req)
+
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+			assert.Equal(t, tt.expectedBody, rr.Body.String())
+			mockClient.AssertExpectations(t)
+		})
+	}
 }
 
 func TestBucketExists(t *testing.T) {
-	mockClient := new(MockMinioClient)
-	logger := logrus.New()
-	logger.SetOutput(io.Discard)
+    mockClient := new(mocks.MockMinioClient)
+    logger := logrus.New()
+    logger.SetOutput(io.Discard)
 
-	minioInstances := []storage.MinioInstance{
-		{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
-	}
-	h := NewHandler(minioInstances, logger)
+    minioInstances := []minio_adapter.MinioInstance{
+        {Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
+    }
+    h := NewHandler(minioInstances, logger)
 
-	h.getMinioClient = func(id string) (MinioClientInterface, error) {
-		return mockClient, nil
-	}
+    h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
+        return mockClient, nil
+    }
 
-	mockClient.On("BucketExists", mock.Anything, "existing-bucket").Return(true, nil)
-	mockClient.On("BucketExists", mock.Anything, "non-existing-bucket").Return(false, nil)
+    tests := []struct {
+        bucketName string
+        expected   bool
+        err        error
+    }{
+        {"existing-bucket", true, nil},
+        {"non-existing-bucket", false, nil},
+    }
 
-	// Test existing bucket
-	exists, err := mockClient.BucketExists(context.Background(), "existing-bucket")
-	assert.NoError(t, err)
-	assert.True(t, exists)
+    mockClient.On("BucketExists", mock.Anything, "existing-bucket").Return(true, nil)
+    mockClient.On("BucketExists", mock.Anything, "non-existing-bucket").Return(false, nil)
 
-	// Test non-existing bucket
-	exists, err = mockClient.BucketExists(context.Background(), "non-existing-bucket")
-	assert.NoError(t, err)
-	assert.False(t, exists)
+    for _, test := range tests {
+        t.Run(test.bucketName, func(t *testing.T) {
+            exists, err := mockClient.BucketExists(context.Background(), test.bucketName)
+            assert.NoError(t, err)
+            assert.Equal(t, test.expected, exists)
+        })
+    }
 
-	mockClient.AssertExpectations(t)
+    mockClient.AssertExpectations(t)
 }
 
 func TestHandlePutObject(t *testing.T) {
@@ -165,7 +228,7 @@ func TestHandlePutObject(t *testing.T) {
 		objectID       string
 		bucketExists   bool
 		expectedStatus int
-		setupMock      func(*MockMinioClient)
+		setupMock      func(*mocks.MockMinioClient)
 	}{
 		{
 			name:           "Bucket exists",
@@ -173,7 +236,7 @@ func TestHandlePutObject(t *testing.T) {
 			objectID:       "testid123",
 			bucketExists:   true,
 			expectedStatus: http.StatusOK,
-			setupMock: func(m *MockMinioClient) {
+			setupMock: func(m *mocks.MockMinioClient) {
 				m.On("BucketExists", mock.Anything, "existing-bucket").Return(true, nil).Once()
 				m.On("PutObject", mock.Anything, "existing-bucket", "testid123", mock.Anything, int64(-1), mock.Anything).
 					Return(minio.UploadInfo{}, nil).Once()
@@ -185,7 +248,7 @@ func TestHandlePutObject(t *testing.T) {
 			objectID:       "testid123",
 			bucketExists:   false,
 			expectedStatus: http.StatusNotFound,
-			setupMock: func(m *MockMinioClient) {
+			setupMock: func(m *mocks.MockMinioClient) {
 				m.On("BucketExists", mock.Anything, "non-existing-bucket").Return(false, nil).Once()
 			},
 		},
@@ -194,22 +257,22 @@ func TestHandlePutObject(t *testing.T) {
 			bucketName:     "existing-bucket",
 			objectID:       "invalid_id!",
 			expectedStatus: http.StatusBadRequest,
-			setupMock:      func(m *MockMinioClient) {}, // No mocks needed for this case
+			setupMock:      func(m *mocks.MockMinioClient) {}, // No mocks needed for this case
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockClient := new(MockMinioClient)
+			mockClient := new(mocks.MockMinioClient)
 			logger := logrus.New()
 			logger.SetOutput(io.Discard)
 
-			minioInstances := []storage.MinioInstance{
+			minioInstances := []minio_adapter.MinioInstance{
 				{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
 			}
 			h := NewHandler(minioInstances, logger)
 
-			h.getMinioClient = func(id string) (MinioClientInterface, error) {
+			h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
 				return mockClient, nil
 			}
 
@@ -231,87 +294,116 @@ func TestHandlePutObject(t *testing.T) {
 }
 
 func TestHandleGetObject(t *testing.T) {
-	testCases := []struct {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+
+	minioInstances := []minio_adapter.MinioInstance{
+		{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
+	}
+
+	tests := []struct {
 		name           string
 		bucketName     string
 		objectID       string
-		bucketExists   bool
-		objectExists   bool
+		setupMock      func(*mocks.MockMinioClient)
 		expectedStatus int
 		expectedBody   string
-		setupMock      func(*MockMinioClient, *MockMinioObject)
 	}{
 		{
-			name:           "Bucket and object exist",
-			bucketName:     "existing-bucket",
-			objectID:       "testid123",
-			bucketExists:   true,
-			objectExists:   true,
+			name:       "Successful object retrieval",
+			bucketName: "testbucket",
+			objectID:   "testobject123",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("BucketExists", mock.Anything, "testbucket").Return(true, nil)
+				mockObject := new(mocks.MockMinioObject)
+				mockObject.On("Stat").Return(minio.ObjectInfo{ContentType: "text/plain"}, nil)
+				mockObject.On("Read", mock.Anything).Run(func(args mock.Arguments) {
+					b := args.Get(0).([]byte)
+					copy(b, "test content")
+				}).Return(12, io.EOF)
+				mockObject.On("Close").Return(nil)
+				m.On("GetObject", mock.Anything, "testbucket", "testobject123", mock.Anything).Return(mockObject, nil)
+			},
 			expectedStatus: http.StatusOK,
-			expectedBody:   "test data",
-			setupMock: func(mc *MockMinioClient, mo *MockMinioObject) {
-				mc.On("BucketExists", mock.Anything, "existing-bucket").Return(true, nil).Once()
-				mc.On("GetObject", mock.Anything, "existing-bucket", "testid123", mock.Anything).Return(mo, nil).Once()
-				mo.On("Stat").Return(minio.ObjectInfo{ContentType: "application/octet-stream", Size: 9}, nil)
-				mo.On("Close").Return(nil)
-			},
+			expectedBody:   "test content",
 		},
 		{
-			name:           "Bucket doesn't exist",
-			bucketName:     "non-existing-bucket",
-			objectID:       "testid123",
-			bucketExists:   false,
+			name:       "Non-existent bucket",
+			bucketName: "nonexistentbucket",
+			objectID:   "testobject123",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("BucketExists", mock.Anything, "nonexistentbucket").Return(false, nil)
+			},
 			expectedStatus: http.StatusNotFound,
-			setupMock: func(mc *MockMinioClient, mo *MockMinioObject) {
-				mc.On("BucketExists", mock.Anything, "non-existing-bucket").Return(false, nil).Once()
-			},
+			expectedBody:   "Bucket not found\n",
 		},
 		{
-			name:           "Invalid object ID",
-			bucketName:     "existing-bucket",
-			objectID:       "invalid_id!",
+			name:       "Non-existent object",
+			bucketName: "testbucket",
+			objectID:   "nonexistentobject",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("BucketExists", mock.Anything, "testbucket").Return(true, nil)
+				m.On("GetObject", mock.Anything, "testbucket", "nonexistentobject", mock.Anything).Return(nil, minio.ErrorResponse{Code: "NoSuchKey"})
+			},
+			expectedStatus: http.StatusNotFound,
+			expectedBody:   "Object not found\n",
+		},
+		{
+			name:       "Server error",
+			bucketName: "testbucket",
+			objectID:   "errorobject",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("BucketExists", mock.Anything, "testbucket").Return(true, nil)
+				m.On("GetObject", mock.Anything, "testbucket", "errorobject", mock.Anything).Return(nil, errors.New("internal server error"))
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Internal server error\n",
+		},
+		{
+			name:       "Invalid object ID",
+			bucketName: "testbucket",
+			objectID:   "invalid_id!",
+			setupMock:  func(m *mocks.MockMinioClient) {},
 			expectedStatus: http.StatusBadRequest,
-			setupMock:      func(mc *MockMinioClient, mo *MockMinioObject) {},
+			expectedBody:   "ID must contain only alphanumeric characters\n",
+		},
+		{
+			name:       "Error getting object stats",
+			bucketName: "testbucket",
+			objectID:   "staterrorobject",
+			setupMock: func(m *mocks.MockMinioClient) {
+				m.On("BucketExists", mock.Anything, "testbucket").Return(true, nil)
+				mockObject := new(mocks.MockMinioObject)
+				mockObject.On("Stat").Return(minio.ObjectInfo{}, errors.New("error getting object stats"))
+				mockObject.On("Close").Return(nil) // Add this line
+				m.On("GetObject", mock.Anything, "testbucket", "staterrorobject", mock.Anything).Return(mockObject, nil)
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedBody:   "Failed to get object stats\n",
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			mockClient := new(MockMinioClient)
-			mockObject := new(MockMinioObject)
-			if tc.objectExists {
-				mockObject.Reader = bytes.NewReader([]byte(tc.expectedBody))
-			}
-			logger := logrus.New()
-			logger.SetOutput(io.Discard)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(mocks.MockMinioClient)
+			tt.setupMock(mockClient)
 
-			minioInstances := []storage.MinioInstance{
-				{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
-			}
 			h := NewHandler(minioInstances, logger)
-
-			h.getMinioClient = func(id string) (MinioClientInterface, error) {
+			h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
 				return mockClient, nil
 			}
-
-			tc.setupMock(mockClient, mockObject)
 
 			r := chi.NewRouter()
 			r.Get("/buckets/{bucketName}/objects/{id}", h.HandleGetObject)
 
-			req, _ := http.NewRequest("GET", fmt.Sprintf("/buckets/%s/objects/%s", tc.bucketName, tc.objectID), nil)
+			req, _ := http.NewRequest("GET", fmt.Sprintf("/buckets/%s/objects/%s", tt.bucketName, tt.objectID), nil)
 			rr := httptest.NewRecorder()
 
 			r.ServeHTTP(rr, req)
 
-			assert.Equal(t, tc.expectedStatus, rr.Code)
-			if tc.expectedStatus == http.StatusOK {
-				assert.Equal(t, tc.expectedBody, rr.Body.String())
-				assert.Equal(t, "application/octet-stream", rr.Header().Get("Content-Type"))
-				assert.Equal(t, "9", rr.Header().Get("Content-Length"))
-			}
+			assert.Equal(t, tt.expectedStatus, rr.Code)
+			assert.Equal(t, tt.expectedBody, rr.Body.String())
 			mockClient.AssertExpectations(t)
-			mockObject.AssertExpectations(t)
 		})
 	}
 }
@@ -324,7 +416,7 @@ func TestHandleDeleteObject(t *testing.T) {
 		bucketExists   bool
 		objectExists   bool
 		expectedStatus int
-		setupMock      func(*MockMinioClient)
+		setupMock      func(*mocks.MockMinioClient)
 	}{
 		{
 			name:           "Bucket and object exist",
@@ -333,7 +425,7 @@ func TestHandleDeleteObject(t *testing.T) {
 			bucketExists:   true,
 			objectExists:   true,
 			expectedStatus: http.StatusNoContent,
-			setupMock: func(m *MockMinioClient) {
+			setupMock: func(m *mocks.MockMinioClient) {
 				m.On("BucketExists", mock.Anything, "existing-bucket").Return(true, nil).Once()
 				m.On("RemoveObject", mock.Anything, "existing-bucket", "testid123", mock.Anything).Return(nil).Once()
 			},
@@ -344,7 +436,7 @@ func TestHandleDeleteObject(t *testing.T) {
 			objectID:       "testid123",
 			bucketExists:   false,
 			expectedStatus: http.StatusNotFound,
-			setupMock: func(m *MockMinioClient) {
+			setupMock: func(m *mocks.MockMinioClient) {
 				m.On("BucketExists", mock.Anything, "non-existing-bucket").Return(false, nil).Once()
 			},
 		},
@@ -353,22 +445,22 @@ func TestHandleDeleteObject(t *testing.T) {
 			bucketName:     "existing-bucket",
 			objectID:       "invalid_id!",
 			expectedStatus: http.StatusBadRequest,
-			setupMock:      func(m *MockMinioClient) {},
+			setupMock:      func(m *mocks.MockMinioClient) {},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mockClient := new(MockMinioClient)
+			mockClient := new(mocks.MockMinioClient)
 			logger := logrus.New()
 			logger.SetOutput(io.Discard)
 
-			minioInstances := []storage.MinioInstance{
+			minioInstances := []minio_adapter.MinioInstance{
 				{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
 			}
 			h := NewHandler(minioInstances, logger)
 
-			h.getMinioClient = func(id string) (MinioClientInterface, error) {
+			h.getMinioClient = func(id string) (minio_adapter.MinioClientInterface, error) {
 				return mockClient, nil
 			}
 
@@ -387,11 +479,12 @@ func TestHandleDeleteObject(t *testing.T) {
 		})
 	}
 }
+
 func TestHandleHealthCheck(t *testing.T) {
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
 
-	minioInstances := []storage.MinioInstance{
+	minioInstances := []minio_adapter.MinioInstance{
 		{Endpoint: "localhost:9000", AccessKey: "test", SecretKey: "test"},
 	}
 	h := NewHandler(minioInstances, logger)

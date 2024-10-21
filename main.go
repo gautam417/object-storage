@@ -11,8 +11,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sirupsen/logrus"
+	"github.com/spacelift-io/homework-object-storage/docker_discovery"
 	"github.com/spacelift-io/homework-object-storage/handlers"
-	"github.com/spacelift-io/homework-object-storage/storage"
+	customMiddleware "github.com/spacelift-io/homework-object-storage/middleware"
+	"golang.org/x/time/rate"
 )
 
 func main() {
@@ -20,7 +22,7 @@ func main() {
 	logger.SetFormatter(&logrus.JSONFormatter{})
 	logger.SetOutput(os.Stdout)
 
-	minioInstances, err := storage.DiscoverMinioInstances()
+	minioInstances, err := docker_discovery.DiscoverMinioInstances()
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to discover MinIO instances")
 	}
@@ -31,7 +33,10 @@ func main() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
+	r.Use(customMiddleware.RateLimiter(rate.Limit(100), 50))
 	h := handlers.NewHandler(minioInstances, logger)
+	
+	r.Get("/healthz", h.HandleHealthCheck)
 
 	r.Route("/buckets", func(r chi.Router) {
 		r.Post("/", h.HandleCreateBucket)
